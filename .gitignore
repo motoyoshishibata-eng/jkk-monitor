@@ -1,0 +1,25 @@
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+.env
+.pytest_cache/
+*.egg-info/
+dist/
+build/
+.playwright/
+
+# Cookie・取得HTML（個人情報を含む可能性）
+# data/state.json と data/city_codes.json は GitHub Actions で更新するため追跡する
+data/storage_state.json
+data/*.html
+data/raw/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# Claude Code local settings
+.claude/

@@ -1,0 +1,65 @@
+name: JKK monitor
+
+on:
+  schedule:
+    # 5分ごと（GitHub Actionsの最短間隔。実行は数分遅延することあり）
+    - cron: '*/5 * * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write  # state.json の自動コミット用
+
+concurrency:
+  group: jkk-monitor
+  cancel-in-progress: false
+
+jobs:
+  monitor:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e .
+
+      - name: Cache Playwright browsers
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-chromium
+
+      - name: Install Playwright Chromium
+        run: python -m playwright install --with-deps chromium
+
+      - name: Build city codes map (if missing)
+        run: |
+          if [ ! -f data/city_codes.json ]; then
+            python tools/build_city_map.py
+          fi
+
+      - name: Run monitor
+        env:
+          JKK_USER_ID: ${{ secrets.JKK_USER_ID }}
+          JKK_PASSWORD: ${{ secrets.JKK_PASSWORD }}
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: python -m src.main
+
+      - name: Commit updated state
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add data/state.json
+          if git diff --cached --quiet; then
+            echo "No state changes"
+          else
+            git commit -m "chore: update state $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            git push
+          fi

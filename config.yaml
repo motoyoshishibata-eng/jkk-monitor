@@ -1,0 +1,32 @@
+monitor:
+  poll_interval_minutes: 5
+  user_agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+  timeout_seconds: 30
+  max_retries: 3
+
+filters:
+  # 監視対象の市区町村
+  areas:
+    - 小金井市
+  # 家賃上限（円）。null なら制限なし
+  rent_max: null
+  # 間取り。空配列なら全件
+  layouts: []
+  # 専有面積下限（m²）。null なら制限なし
+  area_min_m2: null
+
+notifications:
+  discord:
+    enabled: true
+  line:
+    enabled: false
+  telegram:
+    enabled: false
+
+auto_apply:
+  # Phase 2 以降で有効化
+  enabled: false
+  # prefill_only: フォーム自動入力のみ（推奨）
+  # full_auto: 申込ボタンも自動クリック（§10 の警告参照・非推奨）
+  mode: "prefill_only"
+  open_in_browser: true
