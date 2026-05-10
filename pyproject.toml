@@ -5,12 +5,12 @@ description = "JKK東京 空き家自動監視・通知システム（個人利�
 requires-python = ">=3.11"
 dependencies = [
     "httpx>=0.27",
-    "selectolax>=0.3.21",
+    "beautifulsoup4>=4.12",
+    "lxml>=5.0",
     "playwright>=1.40",
     "pydantic>=2.5",
     "python-dotenv>=1.0",
     "pyyaml>=6.0",
-    "structlog>=24.1",
 ]
 
 [project.optional-dependencies]
