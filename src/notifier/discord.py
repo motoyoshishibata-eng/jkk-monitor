@@ -18,6 +18,12 @@ class DiscordNotifier(Notifier):
         ]
         if listing.address:
             fields.append({"name": "住所", "value": listing.address, "inline": False})
+        if listing.jkk_id:
+            fields.append({
+                "name": "jkk_id (PCクイック申込用)",
+                "value": f"`{listing.jkk_id}`",
+                "inline": False,
+            })
         layout_parts: list[str] = []
         if listing.layout:
             layout_parts.append(listing.layout)
