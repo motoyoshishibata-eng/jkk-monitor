@@ -16,7 +16,10 @@ concurrency:
 jobs:
   monitor:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    # スクリプト側の FETCH_DEADLINE_SECONDS=420（7分）+ セットアップ余裕。
+    # workflow timeout に達すると state.json が保存されず consecutive_failures
+    # カウンタが永久に 0 のままになり、しきい値抑制が機能しなくなる。
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
 

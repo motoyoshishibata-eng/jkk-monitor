@@ -11,6 +11,7 @@ JKK仕様の特殊事情:
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 from typing import Iterable, Optional
 
@@ -22,6 +23,11 @@ from .parser import has_results, parse_listings
 START_URL = "https://jhomes.to-kousya.or.jp/search/jkknet/service/akiyaJyoukenStartInit"
 DEFAULT_CITY_MAP_PATH = Path("data/city_codes.json")
 CZ_NUMBERS = list(range(1, 12))
+
+# 全クラスタ処理の上限時間。これを超えたら以降のクラスタをスキップして
+# FetchError を上げる。workflow timeout (10分) 到達前に Python 例外として
+# 捕捉させ、main.py の連続失敗カウンタを正しく加算するための保険。
+FETCH_DEADLINE_SECONDS = 420
 
 
 class FetchError(RuntimeError):
@@ -153,16 +159,24 @@ def fetch_listings(
         )
 
     all_listings: list[Listing] = []
+    started_at = time.monotonic()
+    completed_clusters = 0
 
     with sync_playwright() as p:
         # JKK は no-cache 強制のため go_back が ERR_CACHE_MISS を起こす。
         # 各クラスタは fresh popup で取得する。
         for cz_no in CZ_NUMBERS:
+            if time.monotonic() - started_at > FETCH_DEADLINE_SECONDS:
+                raise FetchError(
+                    f"全体タイムアウト {FETCH_DEADLINE_SECONDS}s を超過 "
+                    f"(完了クラスタ {completed_clusters}/{len(CZ_NUMBERS)})"
+                )
             browser, _ctx, popup = _open_search_popup(p)
             try:
                 _go_to_map(popup)
                 cluster_listings = _fetch_cluster(popup, cz_no)
                 all_listings.extend(cluster_listings)
+                completed_clusters += 1
             finally:
                 browser.close()
 
