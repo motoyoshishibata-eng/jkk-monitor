@@ -1,5 +1,5 @@
 {
-  "last_checked_at": "2026-05-13T10:47:38.980067",
+  "last_checked_at": "2026-05-13T10:52:21.457957",
   "known_listings": {
     "jkk:4080020_0001": {
       "name": "小金井貫井",
@@ -11,17 +11,6 @@
       "url": "https://jhomes.to-kousya.or.jp/search/jkknet/service/akiyaJyoukenStartInit",
       "jkk_id": "4080020_0001",
       "first_seen_at": "2026-05-13T01:02:59.119218"
-    },
-    "jkk:4080070_0004": {
-      "name": "トミンハイム小金井中町",
-      "room": "0004",
-      "rent": 129800,
-      "address": "小金井市",
-      "layout": "2LDK",
-      "area_m2": 69.58,
-      "url": "https://jhomes.to-kousya.or.jp/search/jkknet/service/akiyaJyoukenStartInit",
-      "jkk_id": "4080070_0004",
-      "first_seen_at": "2026-05-13T01:02:59.119280"
     }
   },
   "consecutive_failures": 0,
