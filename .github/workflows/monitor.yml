@@ -53,6 +53,9 @@ jobs:
         run: python -m src.main
 
       - name: Commit updated state
+        # 連続失敗カウンタも state.json に保存するため、Run monitor が exit 1
+        # した場合でもコミットを試みる。
+        if: always()
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"

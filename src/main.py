@@ -25,6 +25,10 @@ ROOT = Path(__file__).parent.parent
 CONFIG_PATH = ROOT / "config.yaml"
 STATE_PATH = ROOT / "data" / "state.json"
 
+# fetch失敗が何回連続したらメール通知（=ワークフローを失敗終了）するか。
+# 5分間隔の実行なので 5 = 約25分の取得不能を許容。
+FAILURE_NOTIFY_THRESHOLD = 5
+
 logger = logging.getLogger("jkk_monitor")
 
 
@@ -62,7 +66,13 @@ def _build_notifiers(config: dict) -> list[Notifier]:
 
 
 def run() -> int:
-    """1回分の監視を実行する。終了コード: 0=成功, 1=fetch失敗, 2=設定エラー。"""
+    """1回分の監視を実行する。
+
+    終了コード:
+        0 = 成功 / fetch失敗だが連続失敗しきい値未満（メール抑制）
+        1 = 連続失敗がしきい値到達（GitHubが失敗メールを送る）
+        2 = 設定エラー
+    """
     _setup_logging()
     load_dotenv(ROOT / ".env")
 
@@ -81,15 +91,44 @@ def run() -> int:
     rent_max = filters.get("rent_max")
     logger.info("検索条件: areas=%s, rent_max=%s", areas, rent_max)
 
+    state = load_state(STATE_PATH)
+
     try:
         current = fetch_listings(areas=areas, rent_max=rent_max)
     except Exception as e:
         logger.exception("fetch失敗: %s", e)
-        return 1
+        state.consecutive_failures += 1
+        logger.warning(
+            "連続失敗カウンタ: %d / %d",
+            state.consecutive_failures,
+            FAILURE_NOTIFY_THRESHOLD,
+        )
+        # しきい値に到達した瞬間だけ exit 1（GitHub が失敗メールを送る）。
+        # それ以前および既通知後は exit 0 で抑制する。
+        if (
+            state.consecutive_failures >= FAILURE_NOTIFY_THRESHOLD
+            and not state.failure_notified
+        ):
+            state.failure_notified = True
+            save_state(state, STATE_PATH)
+            logger.error(
+                "連続%d回失敗。メール通知のため exit 1 します。",
+                state.consecutive_failures,
+            )
+            return 1
+        save_state(state, STATE_PATH)
+        return 0
 
     logger.info("取得件数: %d", len(current))
 
-    state = load_state(STATE_PATH)
+    if state.consecutive_failures or state.failure_notified:
+        logger.info(
+            "fetch復旧。連続失敗カウンタ %d → 0、failure_notified リセット。",
+            state.consecutive_failures,
+        )
+        state.consecutive_failures = 0
+        state.failure_notified = False
+
     diff_result = detect(current, state)
     logger.info(
         "差分: 新規=%d / 既存=%d / 消失=%d",

@@ -37,3 +37,8 @@ class State(BaseModel):
 
     last_checked_at: Optional[datetime] = None
     known_listings: dict[str, Listing] = Field(default_factory=dict)
+
+    # 連続fetch失敗の追跡。5回連続でメール通知（=GitHub Actions失敗）し、
+    # その後は復旧するまで通知を抑制する。
+    consecutive_failures: int = 0
+    failure_notified: bool = False
