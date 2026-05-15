@@ -1,29 +1,6 @@
 {
-  "last_checked_at": "2026-05-15T04:57:44.958712",
-  "known_listings": {
-    "jkk:4080020_0001": {
-      "name": "小金井貫井",
-      "room": "0001",
-      "rent": 44900,
-      "address": "小金井市",
-      "layout": "2DK",
-      "area_m2": 34.56,
-      "url": "https://jhomes.to-kousya.or.jp/search/jkknet/service/akiyaJyoukenStartInit",
-      "jkk_id": "4080020_0001",
-      "first_seen_at": "2026-05-15T04:47:15.945459"
-    },
-    "jkk:4080120_0002": {
-      "name": "カーメスト武蔵小金井",
-      "room": "0002",
-      "rent": 154900,
-      "address": "小金井市",
-      "layout": "2LDK",
-      "area_m2": 54.71,
-      "url": "https://jhomes.to-kousya.or.jp/search/jkknet/service/akiyaJyoukenStartInit",
-      "jkk_id": "4080120_0002",
-      "first_seen_at": "2026-05-15T04:47:15.945555"
-    }
-  },
+  "last_checked_at": "2026-05-15T05:03:43.907022",
+  "known_listings": {},
   "consecutive_failures": 0,
   "failure_notified": false
 }
