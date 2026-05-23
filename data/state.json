@@ -24,6 +24,6 @@
       "first_seen_at": "2026-05-23T00:57:02.779785"
     }
   },
-  "consecutive_failures": 0,
+  "consecutive_failures": 1,
   "failure_notified": false
 }
