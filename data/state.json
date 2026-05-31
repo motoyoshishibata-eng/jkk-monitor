@@ -1,6 +1,6 @@
 {
-  "last_checked_at": "2026-05-31T06:07:30.494233",
+  "last_checked_at": "2026-05-31T06:53:20.075129",
   "known_listings": {},
-  "consecutive_failures": 8,
-  "failure_notified": true
+  "consecutive_failures": 0,
+  "failure_notified": false
 }
