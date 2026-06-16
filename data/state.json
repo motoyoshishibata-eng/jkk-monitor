@@ -13,6 +13,6 @@
       "first_seen_at": "2026-06-16T07:17:23.065360"
     }
   },
-  "consecutive_failures": 0,
+  "consecutive_failures": 1,
   "failure_notified": false
 }
