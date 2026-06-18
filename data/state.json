@@ -1,5 +1,5 @@
 {
-  "last_checked_at": "2026-06-18T07:17:51.545955",
+  "last_checked_at": "2026-06-18T07:27:28.200907",
   "known_listings": {
     "jkk:4080020_0000": {
       "name": "小金井貫井",
@@ -13,6 +13,6 @@
       "first_seen_at": "2026-06-18T06:48:13.039845"
     }
   },
-  "consecutive_failures": 1,
+  "consecutive_failures": 0,
   "failure_notified": false
 }
