@@ -1,6 +1,18 @@
 {
-  "last_checked_at": "2026-06-18T06:42:25.650617",
-  "known_listings": {},
+  "last_checked_at": "2026-06-18T06:48:55.008946",
+  "known_listings": {
+    "jkk:4080020_0000": {
+      "name": "小金井貫井",
+      "room": "0000",
+      "rent": 42300,
+      "address": "小金井市",
+      "layout": "2K",
+      "area_m2": 32.85,
+      "url": "https://jhomes.to-kousya.or.jp/search/jkknet/service/akiyaJyoukenStartInit",
+      "jkk_id": "4080020_0000",
+      "first_seen_at": "2026-06-18T06:48:13.039845"
+    }
+  },
   "consecutive_failures": 0,
   "failure_notified": false
 }
