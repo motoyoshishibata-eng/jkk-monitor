@@ -1,18 +1,6 @@
 {
-  "last_checked_at": "2026-06-21T12:42:12.883208",
-  "known_listings": {
-    "jkk:4080120_0002": {
-      "name": "カーメスト武蔵小金井",
-      "room": "0002",
-      "rent": 196200,
-      "address": "小金井市",
-      "layout": "3LDK",
-      "area_m2": 77.27,
-      "url": "https://jhomes.to-kousya.or.jp/search/jkknet/service/akiyaJyoukenStartInit",
-      "jkk_id": "4080120_0002",
-      "first_seen_at": "2026-06-20T07:57:21.146960"
-    }
-  },
+  "last_checked_at": "2026-06-21T12:47:38.184672",
+  "known_listings": {},
   "consecutive_failures": 0,
   "failure_notified": false
 }
