@@ -12,6 +12,12 @@
     - ブレイクアウト判定幅 = カット前1時間の高値+3pips / 安値-3pips
     - 決済 = カット後1時間の終わり（17:59）
     - SL = カット前1時間レンジの反対側（レンジ幅 + 3pips）、最低20pips
+  判定   : 事前登録された単一仮説のイベントスタディなので
+           **パーミュテーション検定**（10,000回・曜日月を層化・片側2.5%以内）
+           + PF>=1.3（コスト控除後）で判定する（v1.1 差分4）。
+           帰無仮説は「狭レンジという条件に意味はなく、どの営業日にブレイクアウトを
+           仕掛けても同じ」。全営業日で同じ仕掛けをしたときの損益を候補として、
+           そこから狭レンジ日と同じ枚数を再抽出する。
   検定回数: ボラ比較1 + 狭レンジ日ブレイク1 + 方向一致/逆行2 + レジーム別2 = 6
 
 オプションの建玉データは使わない（指示書の指定どおり、price action のみ）。
@@ -29,7 +35,8 @@ from ..common.backtest import simulate_stop_entry
 from ..common.cost import CostModel
 from ..common.io import load_mt5_bars, PIP
 from ..common.report import PhaseReport
-from ..common.stats import summarize, bonferroni_t, TestCounter
+from ..common.stats import (summarize, bonferroni_t, TestCounter, judge,
+                            regime_cell, permutation_test, PERM_ITERS)
 
 # --- 事前登録した定数（実行後に変更禁止） ---
 CUT_HOUR = 17
@@ -61,7 +68,25 @@ def _hour_stats(df: pd.DataFrame, hour: int) -> pd.DataFrame:
     return out
 
 
-def run(bars_path: str, cost: CostModel, *, write: bool = True) -> PhaseReport:
+def _setups_for(pre: pd.DataFrame, days) -> list:
+    """指定日の「上下2本の逆指値」セットアップを作る（SL は日ごとのレンジ幅）。"""
+    out = []
+    for day in days:
+        hi, lo = pre.loc[day, "high"], pre.loc[day, "low"]
+        sl = max(MIN_SL_PIPS, (hi - lo) / PIP + BREAK_BUFFER_PIPS)
+        w0 = _dt.datetime.combine(day.date(), _dt.time(CUT_HOUR, 0))
+        w1 = xt = _dt.datetime.combine(day.date(), _dt.time(CUT_HOUR, 59))
+        pre_dir = np.sign(pre.loc[day, "move_pips"])
+        for direction, trig in ((+1, hi + BREAK_BUFFER_PIPS * PIP),
+                                (-1, lo - BREAK_BUFFER_PIPS * PIP)):
+            tag = ("一致" if direction == pre_dir else
+                   "逆行" if pre_dir != 0 else "前方向なし")
+            out.append((w0, w1, direction, trig, xt, f"{day.date()}|{tag}", sl))
+    return out
+
+
+def run(bars_path: str, cost: CostModel, *, n_iter: int = PERM_ITERS,
+        write: bool = True) -> PhaseReport:
     df = load_mt5_bars(bars_path)
     pre = _hour_stats(df, PRE_HOUR)
     post = _hour_stats(df, CUT_HOUR)
@@ -108,30 +133,9 @@ def run(bars_path: str, cost: CostModel, *, write: bool = True) -> PhaseReport:
     notes.append(f"狭レンジ日の判定に使った直前{LOOKBACK_DAYS}営業日の分位は当日を含まない"
                  "（先読み防止）。")
 
-    setups = []
-    for day in pre.index[narrow]:
-        hi, lo = pre.loc[day, "high"], pre.loc[day, "low"]
-        rng = (hi - lo) / PIP
-        sl = max(MIN_SL_PIPS, rng + BREAK_BUFFER_PIPS)
-        w0 = _dt.datetime.combine(day.date(), _dt.time(CUT_HOUR, 0))
-        w1 = _dt.datetime.combine(day.date(), _dt.time(CUT_HOUR, 59))
-        xt = _dt.datetime.combine(day.date(), _dt.time(CUT_HOUR, 59))
-        pre_dir = np.sign(pre.loc[day, "move_pips"])
-        for direction, trig in ((+1, hi + BREAK_BUFFER_PIPS * PIP),
-                                (-1, lo - BREAK_BUFFER_PIPS * PIP)):
-            tag = ("一致" if direction == pre_dir else
-                   "逆行" if pre_dir != 0 else "前方向なし")
-            setups.append((w0, w1, direction, trig, xt, f"{day.date()}|{tag}|{sl:.1f}"))
-
-    # SL はセットアップごとに違うので、SL 幅でグループ分けして回す
-    frames = []
-    for sl_val in sorted({float(s[5].split("|")[2]) for s in setups}):
-        sub = [s for s in setups if float(s[5].split("|")[2]) == sl_val]
-        frames.append(simulate_stop_entry(df, sub, cost, sl_pips=sl_val,
-                                          entry_slippage_pips=1.0,
-                                          sl_slippage_pips=1.0))
-    trades = (pd.concat(frames, ignore_index=True).sort_values("entry_time")
-              .reset_index(drop=True) if frames else pd.DataFrame())
+    trades = simulate_stop_entry(df, _setups_for(pre, pre.index[narrow]), cost,
+                                 sl_pips=MIN_SL_PIPS, entry_slippage_pips=1.0,
+                                 sl_slippage_pips=1.0)
 
     counter.count("狭レンジ日ブレイクアウト（全体）")
     res = summarize(trades["net_pips"] if len(trades) else [])
@@ -168,15 +172,14 @@ def run(bars_path: str, cost: CostModel, *, write: bool = True) -> PhaseReport:
     regime_str = "取引なし"
     if len(trades):
         lab = regime.label_series(pd.DatetimeIndex(trades["entry_time"]))
-        rows = []
+        cells = []
         for name, grp in trades.groupby(lab.to_numpy()):
             counter.count(f"レジーム {name}")
-            r = summarize(grp["net_pips"])
-            rows.append([name, r.n, round(r.mean_pips, 2), round(r.t, 3), round(r.pf, 3)])
-        tables.append(("円高期 / 円安期 別（コスト控除後）",
-                       pd.DataFrame(rows, columns=["期", "n", "平均pips", "t", "PF"])
-                       .to_string(index=False)))
-        regime_str = " / ".join(f"{r[0]}: t={r[3]} PF={r[4]} n={r[1]}" for r in rows)
+            cells.append(f"{name}: {regime_cell(summarize(grp['net_pips']))}")
+        tables.append(("円高期 / 円安期 別（コスト控除後）", "\n".join(cells)
+                       + "\n\nレジーム別は参考値であり、単独では合否判定に使わない"
+                         "（v1.1 差分4）。"))
+        regime_str = " / ".join(cells)
 
     # --- (5) 近傍安定性: カット時刻を ±1時間ずらす ---
     stab = []
@@ -194,12 +197,11 @@ def run(bars_path: str, cost: CostModel, *, write: bool = True) -> PhaseReport:
             sl = max(MIN_SL_PIPS, (hi - lo) / PIP + BREAK_BUFFER_PIPS)
             w0 = _dt.datetime.combine(day.date(), _dt.time(h, 0))
             w1 = xt = _dt.datetime.combine(day.date(), _dt.time(h, 59))
-            for dr, tg in ((+1, hi + BREAK_BUFFER_PIPS * PIP), (-1, lo - BREAK_BUFFER_PIPS * PIP)):
-                st2.append((w0, w1, dr, tg, xt, f"{day.date()}|x|{sl:.1f}"))
-        fr = [simulate_stop_entry(df, [s for s in st2 if float(s[5].split("|")[2]) == v],
-                                  cost, sl_pips=v, entry_slippage_pips=1.0, sl_slippage_pips=1.0)
-              for v in sorted({float(s[5].split("|")[2]) for s in st2})]
-        t2 = pd.concat(fr, ignore_index=True) if fr else pd.DataFrame()
+            for dr, tg in ((+1, hi + BREAK_BUFFER_PIPS * PIP),
+                           (-1, lo - BREAK_BUFFER_PIPS * PIP)):
+                st2.append((w0, w1, dr, tg, xt, f"{day.date()}|x", sl))
+        t2 = simulate_stop_entry(df, st2, cost, sl_pips=MIN_SL_PIPS,
+                                 entry_slippage_pips=1.0, sl_slippage_pips=1.0)
         r = summarize(t2["net_pips"] if len(t2) else [])
         stab.append([f"{shift:+d}時間", r.n, round(r.mean_pips, 2), round(r.t, 3)])
     tables.append(("近傍安定性（カット時刻を±1時間ずらす）",
@@ -209,23 +211,38 @@ def run(bars_path: str, cost: CostModel, *, write: bool = True) -> PhaseReport:
     signs = {np.sign(v) for v in [res.mean_pips] + [s[2] for s in stab] if v == v}
     stable = len(signs) == 1
 
+    # --- 差分4: パーミュテーション検定 ---
+    # 帰無仮説は「狭レンジという条件に意味はなく、どの営業日に仕掛けても同じ」。
+    # 全営業日で同じ仕掛けをした損益を候補にして、狭レンジ日と同じ枚数を再抽出する。
+    all_tr = simulate_stop_entry(df, _setups_for(pre, pre.index), cost,
+                                 sl_pips=MIN_SL_PIPS, entry_slippage_pips=1.0,
+                                 sl_slippage_pips=1.0)
+    if len(all_tr):
+        day_pnl = all_tr.assign(
+            day=all_tr["tag"].str.split("|").str[0]).groupby("day")["net_pips"].sum()
+        day_pnl.index = pd.DatetimeIndex(day_pnl.index)
+        # 1本も成立しなかった日は損益0（仕掛けたが不発）として候補に残す
+        contrib = day_pnl.reindex(pd.DatetimeIndex(pre.index)).fillna(0.0)
+    else:
+        contrib = pd.Series(dtype="float64", index=pd.DatetimeIndex([]))
+    perm = permutation_test(contrib, pd.DatetimeIndex(pre.index[narrow]), n_iter=n_iter)
+    tables.append((f"パーミュテーション検定（v1.1 差分4・{n_iter:,}回）",
+                   perm.summary() + "\n\n"
+                   "帰無仮説は『狭レンジという条件に意味はなく、どの営業日に"
+                   "ブレイクアウトを仕掛けても同じ』。\n"
+                   "全営業日に同じ仕掛けをした場合の1日あたり損益を候補とし、"
+                   "狭レンジ日と同じ日数を曜日・月を揃えて再抽出している。\n"
+                   "1本も成立しなかった日は損益0として候補に残す"
+                   "（不発も戦略の一部なので落とさない）。"
+                   + (f"\n注意: {perm.strata_note}" if perm.strata_note else "")))
+
     n_tests = max(N_TESTS, len(counter))
     crit = bonferroni_t(n_tests)
-    chk = res.passes(n_tests)
-    verdict = "合格" if (chk["overall"] and stable) else "不合格"
-    if verdict == "不合格":
-        if res.n < 100:
-            reason = f"成立本数 {res.n} で基準の100回未満。"
-        elif abs(res.t) < 2:
-            reason = (f"コスト控除後 t={res.t:.2f}（控除前 {gross.t:.2f}）で |t|>=2 未満。"
-                      "ブレイクアウトは往復ビンタのコスト負担が重い。")
-        elif res.pf < 1.3:
-            reason = f"コスト控除後 PF={res.pf:.2f} で基準の1.3未満。"
-        else:
-            reason = "カット時刻を±1時間ずらすと符号が反転する（17:00 特有とは言えない）。"
-    else:
-        reason = (f"控除後 t={res.t:.2f}/PF={res.pf:.2f}/n={res.n}、"
-                  f"カット時刻±1時間でも符号が安定。")
+    ok, reason = judge(res, kind="event", perm=perm)
+    if ok and not stable:
+        ok, reason = False, "カット時刻を±1時間ずらすと符号が反転する（17:00 特有とは言えない）。"
+    verdict = "合格" if ok else "不合格"
+    reason += f"（控除前 t={gross.t:.2f} / 控除後 t={res.t:.2f}）"
 
     rep = PhaseReport(
         phase="Phase 3", axis="NYオプションカット後のレジーム変化",
@@ -236,7 +253,11 @@ def run(bars_path: str, cost: CostModel, *, write: bool = True) -> PhaseReport:
                       f" ブレイク幅=高安±{BREAK_BUFFER_PIPS:.0f}pips /"
                       f" SL=レンジ幅+{BREAK_BUFFER_PIPS:.0f}pips（最低{MIN_SL_PIPS:.0f}pips）",
         n_tests=n_tests, bonferroni_crit_t=crit,
-        result_after_cost=f"t = {res.t:.3f} / PF = {res.pf:.3f} / 成立本数 = {res.n}",
+        judgment_method=f"パーミュテーション検定 {n_iter:,}回（曜日・月を層化）+ PF>=1.3",
+        permutation=perm.summary().replace("\n", " / "),
+        result_after_cost=f"片側p = {perm.p_one_sided:.4f}"
+                          f"（{perm.percentile:.1f}パーセンタイル）/ "
+                          f"PF = {res.pf:.3f} / 成立本数 = {res.n} / t = {res.t:.3f}",
         regime_breakdown=regime_str,
         neighborhood="崩れない" if stable else "崩れる",
         verdict=verdict, reason=reason,

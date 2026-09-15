@@ -1,6 +1,8 @@
 # 円高期 / 円安期 の区分。
 # source 列に PLACEHOLDER が残っている限り、レポート先頭に警告が出ます。
-# PROJECT.md §4 決定表の区分に書き換えたら source を "PROJECT.md-s4" に変更してください。
+# 既存EA開発リポジトリの PROJECT.md §4 決定表の区分に書き換えたら
+# source を "ea-repo-PROJECT.md-s4" に変更してください。
+# （本パッケージの PREREGISTRATION.md ではありません。指示書 v1.1 差分5）
 # 下記の暫定区分は「アベノミクス前後」という一般的な切り方に過ぎず、
 # 既存プロジェクトの定義とは異なる可能性が高いです。
 label,start,end,source

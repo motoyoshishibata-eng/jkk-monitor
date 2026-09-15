@@ -47,7 +47,7 @@ from ..common.backtest import simulate, series_at_hour
 from ..common.cost import CostModel
 from ..common.io import load_mt5_bars, load_series_csv
 from ..common.report import PhaseReport
-from ..common.stats import summarize, zscore, bonferroni_t
+from ..common.stats import summarize, zscore, bonferroni_t, judge, regime_cell
 
 DATA = Path(__file__).resolve().parent.parent / "data"
 OI_FILE = DATA / "click365_usdjpy.csv"
@@ -69,6 +69,8 @@ def _missing_report(write: bool) -> PhaseReport:
         hypothesis="日本の個人投資家の建玉偏りが極端になると踏み上げ／投げが発生する",
         preregistered=f"Zスコア(250日) 閾値 ±1.5/±2.0 / 保有 1・5・20日 / 方向2通り"
                       f" = 検定{N_TESTS}回",
+        judgment_method="総当たり探索型のため従来基準: "
+                        f"n>=100 + |t|>=2 + PF>=1.3 + Bonferroni補正",
         n_tests=N_TESTS, bonferroni_crit_t=bonferroni_t(N_TESTS),
         result_after_cost="未実行（建玉データ未取得）",
         regime_breakdown="未実行", neighborhood="未実行",
@@ -180,11 +182,11 @@ def run(bars_path: str, cost: CostModel, *, exec_hour: int = DEFAULT_EXEC_HOUR,
         row = passed.loc[passed["t"].abs().idxmax()]
         key = (row["Z閾値"], row["保有日"], row["方向"])
         trades, res = detail[key]
-        verdict = "合格"
-        reason = (f"Z閾値±{row['Z閾値']} / 保有{row['保有日']}日 / 踏み上げ方向で "
-                  f"控除後 t={row['t']:.2f} / PF={row['PF']:.2f} / n={row['n']} と共通基準を満たす。"
-                  + ("" if abs(row["t"]) >= crit else
-                     f" ただし Bonferroni臨界 {crit:.2f} 未達のため要追試。"))
+        ok, why = judge(res, kind="scan", n_tests=N_TESTS)
+        verdict = "合格" if ok else "不合格"
+        reason = (f"Z閾値±{row['Z閾値']} / 保有{row['保有日']}日 / 踏み上げ方向: " + why)
+        if not ok:
+            trades, res = pd.DataFrame(), summarize([])
     else:
         trades = pd.DataFrame()
         res = summarize([])
@@ -201,14 +203,12 @@ def run(bars_path: str, cost: CostModel, *, exec_hour: int = DEFAULT_EXEC_HOUR,
     regime_str = "該当なし"
     if len(trades):
         lab = regime.label_series(pd.DatetimeIndex(trades["entry_time"]))
-        rr = []
-        for name, grp in trades.groupby(lab.to_numpy()):
-            r = summarize(grp["net_pips"])
-            rr.append([name, r.n, round(r.mean_pips, 2), round(r.t, 3), round(r.pf, 3)])
-        tables.append(("円高期 / 円安期 別（合格候補のコスト控除後）",
-                       pd.DataFrame(rr, columns=["期", "n", "平均pips", "t", "PF"])
-                       .to_string(index=False)))
-        regime_str = " / ".join(f"{r[0]}: t={r[3]} PF={r[4]} n={r[1]}" for r in rr)
+        cells = [f"{name}: {regime_cell(summarize(grp['net_pips']))}"
+                 for name, grp in trades.groupby(lab.to_numpy())]
+        tables.append(("円高期 / 円安期 別（合格候補のコスト控除後）", "\n".join(cells)
+                       + "\n\nレジーム別は参考値であり、単独では合否判定に使わない"
+                         "（v1.1 差分4）。"))
+        regime_str = " / ".join(cells)
 
     # --- 近傍安定性: 閾値 ±0.25、保有 ±1日 ---
     neigh = "該当なし（合格候補なし）"
@@ -244,6 +244,8 @@ def run(bars_path: str, cost: CostModel, *, exec_hour: int = DEFAULT_EXEC_HOUR,
         preregistered=f"買建玉比率の{ZSCORE_WINDOW}日Zスコア / 閾値 ±1.5・±2.0 のみ /"
                       f" 保有 1・5・20日のみ / 方向2通り = 検定{N_TESTS}回",
         n_tests=N_TESTS, bonferroni_crit_t=crit,
+        judgment_method="総当たり探索型（12通りの格子）のため従来基準: "
+                        f"n>=100 + |t|>=2 + PF>=1.3 + Bonferroni臨界|t|={crit:.3f}",
         result_after_cost=(f"t = {res.t:.3f} / PF = {res.pf:.3f} / 取引回数 = {res.n}"
                            if res.n else
                            (f"最良 t = {best['t']:.3f} / PF = {best['PF']:.3f} / n = {int(best['n'])}"

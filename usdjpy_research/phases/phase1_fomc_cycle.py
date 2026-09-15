@@ -6,7 +6,10 @@
            同型の偏りが、リスクオン＝円売りを通じて USDJPY に乗る。
   観測窓 : day -1〜3 / 9〜13 / 19〜23 / 29〜33 を「偶数週＝ロング候補期間」と定義。
            day は営業日ベース、day 0 = FOMC 声明発表日。
-  閾値   : 指示書 §1 共通基準（|t|>=2, PF>=1.3, n>=100, コスト控除後）。
+  判定   : 事前登録された単一仮説のイベントスタディなので、
+           **パーミュテーション検定**（10,000回・曜日月・保有日数を層化・片側2.5%以内）
+           + PF>=1.3（コスト控除後）で判定する（v1.1 差分4）。
+           n>=100 は総当たり探索用の安全装置なので、ここでは課さない。
   検定回数: 主検定1（全期間の偶数週ロング）+ レジーム別2 + 近傍±1日2 = 5。
 
 禁止事項:
@@ -25,9 +28,10 @@ import pandas as pd
 from ..common import events, regime
 from ..common.backtest import simulate, series_at_hour
 from ..common.cost import CostModel
-from ..common.io import load_mt5_bars, PIP
+from ..common.io import load_mt5_bars, resample_bars, PIP
 from ..common.report import PhaseReport
-from ..common.stats import summarize, bonferroni_t, TestCounter
+from ..common.stats import (summarize, bonferroni_t, TestCounter, judge,
+                            regime_cell, permutation_test_multi, PERM_ITERS)
 
 # --- 事前登録した窓（実行後に変更禁止） ---
 EVEN_WEEK_DAYS: frozenset[int] = frozenset(
@@ -59,6 +63,11 @@ def _blocks(cycle: pd.Series, days: frozenset[int]):
     return out
 
 
+def _hold_len(idx: pd.DatetimeIndex, a, b) -> int:
+    """エントリー基準日 a から決済基準日 b までの保有営業日数。"""
+    return int(idx.get_loc(b) - idx.get_loc(a))
+
+
 def _to_signals(blocks, hour: int, minute: int):
     for a, b in blocks:
         ta = _dt.datetime.combine(a.date(), _dt.time(hour, minute))
@@ -73,8 +82,10 @@ def _t_of(s: pd.Series) -> float:
 
 def run(bars_path: str, cost: CostModel, *, exec_hour: int = DEFAULT_EXEC_HOUR,
         exec_minute: int = 0, sl_pips: float = DEFAULT_SL_PIPS,
-        write: bool = True) -> PhaseReport:
-    df = load_mt5_bars(bars_path)
+        n_iter: int = PERM_ITERS, write: bool = True) -> PhaseReport:
+    # スイング保有なので1時間足で足りる。SL の到達判定は M1 と同じ答えになり、
+    # パーミュテーション検定を1万回回しても現実的な時間で終わる。
+    df = resample_bars(load_mt5_bars(bars_path), "1h")
     px = series_at_hour(df, exec_hour, exec_minute)
     tdays = events.trading_day_index(px.index)
 
@@ -108,7 +119,8 @@ def run(bars_path: str, cost: CostModel, *, exec_hour: int = DEFAULT_EXEC_HOUR,
     tables.append(("偶数週 / 奇数週（日次, コスト控除前・参考値）", split.to_string()))
 
     # --- (2) 主検定: 偶数週ロング（コスト控除後） ---
-    trades = simulate(df, _to_signals(_blocks(cycle, EVEN_WEEK_DAYS), exec_hour, exec_minute),
+    blocks = _blocks(cycle, EVEN_WEEK_DAYS)
+    trades = simulate(df, _to_signals(blocks, exec_hour, exec_minute),
                       cost, sl_pips=sl_pips)
     counter.count("偶数週ロング（全期間）")
     res = summarize(trades["net_pips"] if len(trades) else [])
@@ -127,15 +139,14 @@ def run(bars_path: str, cost: CostModel, *, exec_hour: int = DEFAULT_EXEC_HOUR,
     # --- (3) レジーム別 ---
     if len(trades):
         lab = regime.label_series(pd.DatetimeIndex(trades["entry_time"]))
-        rows = []
+        cells = []
         for name, grp in trades.groupby(lab.to_numpy()):
             counter.count(f"偶数週ロング（{name}）")
-            r = summarize(grp["net_pips"])
-            rows.append([name, r.n, round(r.mean_pips, 2), round(r.t, 3), round(r.pf, 3)])
-        tables.append(("円高期 / 円安期 別（コスト控除後）",
-                       pd.DataFrame(rows, columns=["期", "n", "平均pips", "t", "PF"])
-                       .to_string(index=False)))
-        regime_str = " / ".join(f"{r[0]}: t={r[3]} PF={r[4]} n={r[1]}" for r in rows)
+            cells.append(f"{name}: {regime_cell(summarize(grp['net_pips']))}")
+        tables.append(("円高期 / 円安期 別（コスト控除後）", "\n".join(cells)
+                       + "\n\nレジーム別は参考値であり、単独では合否判定に使わない"
+                         "（v1.1 差分4）。n<30 の期は無理に数字を出さない。"))
+        regime_str = " / ".join(cells)
     else:
         regime_str = "取引なし"
 
@@ -154,28 +165,43 @@ def run(bars_path: str, cost: CostModel, *, exec_hour: int = DEFAULT_EXEC_HOUR,
     signs = {np.sign(v) for v in [res.mean_pips] + [s[2] for s in stab] if v == v}
     stable = len(signs) == 1
 
+    # --- 差分4: パーミュテーション検定 ---
+    # 偶数週ブロックの「入り口の日」をランダムな営業日に置き換える。
+    # 保有営業日数が違うブロックを混ぜると帰無分布が別物になるので、
+    # 保有日数もグループとして層化する。
+    lengths = sorted({_hold_len(cycle.index, a, b) for a, b in blocks})
+    contrib_by_group, cand_days = {}, list(cycle.index)
+    for L in lengths:
+        sigs = []
+        for i, day in enumerate(cand_days):
+            if i + L >= len(cand_days):
+                continue
+            t0 = _dt.datetime.combine(day.date(), _dt.time(exec_hour, exec_minute))
+            t1 = _dt.datetime.combine(cand_days[i + L].date(),
+                                      _dt.time(exec_hour, exec_minute))
+            sigs.append((t0, t1, +1, str(day.date())))
+        tr = simulate(df, sigs, cost, sl_pips=sl_pips)
+        if len(tr):
+            c = tr.groupby("tag")["net_pips"].sum()
+            c.index = pd.DatetimeIndex(c.index)
+            contrib_by_group[L] = c.sort_index()
+    ev_multi = [(a, _hold_len(cycle.index, a, b)) for a, b in blocks]
+    perm = permutation_test_multi(contrib_by_group, ev_multi, n_iter=n_iter)
+    tables.append((f"パーミュテーション検定（v1.1 差分4・{n_iter:,}回）",
+                   perm.summary() + "\n\n"
+                   "偶数週ブロックの入り口の日をランダムな営業日に置き換え、"
+                   "曜日・月・保有営業日数を実測に合わせて層化抽出している。\n"
+                   f"保有日数の型: {lengths}"
+                   + (f"\n注意: {perm.strata_note}" if perm.strata_note else "")))
+
     # --- 判定 ---
-    # 事前登録した検定回数と実際に走らせた回数の大きい方を採る
-    # （データ期間の都合でレジーム別が減っても、補正を緩めないため）
     n_tests = max(N_TESTS, len(counter))
     crit = bonferroni_t(n_tests)
-    chk = res.passes(n_tests)
-    verdict = "合格" if (chk["overall"] and stable) else "不合格"
-    if verdict == "不合格":
-        if res.n < 100:
-            reason = f"取引回数 {res.n} 回で基準の100回未満。統計的に判定不能。"
-        elif abs(res.t) < 2:
-            reason = (f"コスト控除後 t={res.t:.2f} で基準の|t|>=2 に届かない"
-                      f"（控除前 t={gross.t:.2f}）。")
-        elif res.pf < 1.3:
-            reason = f"コスト控除後 PF={res.pf:.2f} で基準の1.3未満。"
-        else:
-            reason = "窓を±1営業日ずらすと符号が反転する（偶然の可能性が高い）。"
-    else:
-        reason = (f"コスト控除後 t={res.t:.2f} / PF={res.pf:.2f} / n={res.n} で共通基準を満たし、"
-                  f"±1日の近傍でも符号が安定。"
-                  + ("" if abs(res.t) >= crit else
-                     f" ただし Bonferroni臨界 {crit:.2f} 未達なので要追試。"))
+    ok, reason = judge(res, kind="event", perm=perm)
+    if ok and not stable:
+        ok, reason = False, "窓を±1営業日ずらすと符号が反転する（偶然の可能性が高い）。"
+    verdict = "合格" if ok else "不合格"
+    reason += f"（控除前 t={gross.t:.2f} / 控除後 t={res.t:.2f}）"
 
     rep = PhaseReport(
         phase="Phase 1", axis="FOMCサイクル時間",
@@ -183,7 +209,12 @@ def run(bars_path: str, cost: CostModel, *, exec_hour: int = DEFAULT_EXEC_HOUR,
         preregistered=f"偶数週 = day -1〜3, 9〜13, 19〜23, 29〜33（営業日ベース, day0=声明発表日）"
                       f" / 約定サーバー{exec_hour:02d}:{exec_minute:02d} / SL {sl_pips:.0f}pips",
         n_tests=n_tests, bonferroni_crit_t=crit,
-        result_after_cost=f"t = {res.t:.3f} / PF = {res.pf:.3f} / 取引回数 = {res.n}",
+        judgment_method=f"パーミュテーション検定 {n_iter:,}回"
+                        "（曜日・月・保有日数を層化）+ PF>=1.3",
+        permutation=perm.summary().replace("\n", " / "),
+        result_after_cost=f"片側p = {perm.p_one_sided:.4f}"
+                          f"（{perm.percentile:.1f}パーセンタイル）/ "
+                          f"PF = {res.pf:.3f} / 取引回数 = {res.n} / t = {res.t:.3f}",
         regime_breakdown=regime_str,
         neighborhood="崩れない" if stable else "崩れる",
         verdict=verdict, reason=reason,

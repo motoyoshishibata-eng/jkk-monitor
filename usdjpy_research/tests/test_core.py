@@ -15,6 +15,7 @@ import pytest
 from usdjpy_research.common import tz, events
 from usdjpy_research.common.backtest import simulate, simulate_stop_entry
 from usdjpy_research.common.cost import CostModel, count_rollovers
+from usdjpy_research.common import stats as S
 from usdjpy_research.common.stats import (ndtri, bonferroni_t, summarize,
                                           newey_west_t, zscore)
 
@@ -208,3 +209,203 @@ def test_preregistered_constants_unchanged():
     assert p4.Z_THRESHOLDS == (1.5, 2.0) and p4.HOLD_DAYS == (1, 5, 20)
     assert p4.N_TESTS == 12
     assert (p5.HEDGE_EQUITY, p5.HEDGE_BOND, p5.WINDOW_DAYS) == (0.50, 0.80, 3)
+
+
+# =====================================================================
+# 指示書 v1.1 の差分に対するテスト
+# =====================================================================
+
+# --- 差分1: ロンドンFIX の英米DSTギャップ ---
+@pytest.mark.parametrize("d,want", [
+    ("2024-01-15", 18),   # 両方冬
+    ("2024-04-15", 18),   # 両方夏
+    ("2024-07-01", 18),   # 両方夏
+    ("2024-03-15", 19),   # 米のみ夏（3月第2日曜〜3月最終日曜）
+    ("2024-10-29", 19),   # EUのみ冬（10月最終日曜〜11月第1日曜）
+    ("2024-11-05", 18),   # 両方冬に戻る
+])
+def test_london_fix_gap_periods(d, want):
+    assert tz.london_fix_server_hour(dt.date.fromisoformat(d)) == want
+
+
+def test_gap_periods_exist_every_year():
+    """ギャップ期間は毎年2回、必ず発生する（検証(D)の前提）。"""
+    for y in (2007, 2015, 2024, 2026):
+        days = pd.date_range(f"{y}-01-01", f"{y}-12-31", freq="D")
+        gap = [d for d in days if tz.is_us_dst(d.date()) and not tz.is_uk_dst(d.date())]
+        spring = [d for d in gap if d.month == 3]
+        autumn = [d for d in gap if d.month in (10, 11)]
+        assert spring and autumn, (y, len(spring), len(autumn))
+
+
+# --- 差分2: FOMC 発表時刻の時期テーブル ---
+@pytest.mark.parametrize("date,pc,want_et,want_server", [
+    ("2007-01-31", "no", "14:15", dt.time(21, 15)),       # 記者会見制度が無い時期
+    ("2011-03-15", "no", "14:15", dt.time(21, 15)),
+    ("2011-04-27", "no", "14:15", dt.time(21, 15)),       # 会見なし会合は 14:15 と分かる
+    ("2011-04-27", "yes", None, None),                    # 会見あり -> 要確認
+    ("2012-06-20", "unknown", None, None),                # 不明 -> 要確認
+    ("2013-03-12", "unknown", None, None),                # 統一の前日まで不明
+    ("2013-03-13", "unknown", "14:00", dt.time(21, 0)),   # 統一以降は会見有無によらず 14:00
+    ("2024-01-31", "yes", "14:00", dt.time(21, 0)),
+])
+def test_fomc_announcement_time_era_table(date, pc, want_et, want_server):
+    d = dt.date.fromisoformat(date)
+    assert events.announcement_time_et(d, pc) == want_et
+    assert events.announcement_server_time(d, pc) == want_server
+
+
+def test_et_to_server_offset_is_year_round_seven_hours():
+    """ET -> サーバー時刻は夏冬とも +7時間（片方だけDSTがずれたりしない）。"""
+    assert events.ET_TO_SERVER_HOURS == 7
+    for d in ("2024-07-31", "2024-12-18"):
+        dd = dt.date.fromisoformat(d)
+        assert events.announcement_server_time(dd, "yes") == dt.time(21, 0)
+        assert tz.server_to_et(dt.datetime.combine(dd, dt.time(21, 0))).hour == 14
+
+
+def test_unknown_times_are_not_guessed():
+    """要確認の会合が黙って埋められていないこと（差分2の禁止事項）。"""
+    f = events.load_fomc(scheduled_only=False)
+    unknown = f[~f["time_known"]]
+    assert len(unknown) > 0, "2011-2013 の会見あり会合が unknown になっていない"
+    assert unknown["date"].dt.year.between(2011, 2013).all()
+    assert (unknown["press_conference"].astype(str).str.lower() == "unknown").all()
+
+
+def test_provided_2021_2027_rows_are_verified():
+    f = events.load_fomc(scheduled_only=False)
+    recent = f[f["date"] >= "2021-01-01"]
+    assert len(recent) == 56
+    assert set(recent["verified"].astype(str)) <= {"yes", "scheduled", "tentative"}
+    assert (recent["announcement_time_et"] == "14:00").all()
+
+
+# --- 差分4: パーミュテーション検定 ---
+def _fake_contrib(seed=0, n_days=5000):
+    rng = np.random.default_rng(seed)
+    days = pd.bdate_range("2007-01-01", periods=n_days)
+    return pd.Series(rng.normal(0, 25, n_days), index=days), days, rng
+
+
+def test_permutation_null_is_not_significant():
+    contrib, days, rng = _fake_contrib(1)
+    ev = days[rng.choice(len(days), 150, replace=False)]
+    r = S.permutation_test(contrib, ev, n_iter=1000)
+    assert not r.passed and r.p_one_sided > 0.05
+
+
+def test_permutation_detects_a_real_effect():
+    contrib, days, rng = _fake_contrib(2)
+    ev = days[rng.choice(len(days), 150, replace=False)]
+    contrib.loc[ev] += 30
+    r = S.permutation_test(contrib, ev, n_iter=1000)
+    assert r.passed and r.p_one_sided <= S.PERM_ALPHA
+
+
+def test_permutation_matches_day_of_week_and_month():
+    """火水に偏ったイベントなら、帰無分布も火水からしか引かないこと。"""
+    contrib, days, _ = _fake_contrib(3)
+    tw = days[days.dayofweek.isin([1, 2])]
+    r = S.permutation_test(contrib, tw[:120], n_iter=200)
+    assert r.n_strata <= 2 * 12          # 曜日2 × 月12 が上限
+    assert r.strata_note.strip("; ") == ""   # 復元抽出に落ちていない
+
+
+def test_permutation_p_value_never_zero():
+    """add-one 補正があるので p=0 にはならない（10,000回でも 1/10001 が下限）。"""
+    contrib, days, rng = _fake_contrib(4)
+    ev = days[rng.choice(len(days), 100, replace=False)]
+    contrib.loc[ev] += 500
+    r = S.permutation_test(contrib, ev, n_iter=500)
+    assert r.p_one_sided > 0
+
+
+def test_permutation_multi_separates_window_shapes():
+    contrib, days, rng = _fake_contrib(5)
+    other = pd.Series(rng.normal(0, 5, len(days)), index=days)
+    ev = days[rng.choice(len(days), 120, replace=False)]
+    evm = [(d, "A") for d in ev[:60]] + [(d, "B") for d in ev[60:]]
+    r = S.permutation_test_multi({"A": contrib, "B": other}, evm, n_iter=500)
+    assert 0 < r.p_one_sided <= 1 and r.n_events == 120
+
+
+def test_pooled_permutation_uses_same_dates_across_pairs():
+    """ペア間の相関を保つと帰無分布の分散が縮まない（=有意に見えすぎない）。"""
+    rng = np.random.default_rng(6)
+    days = pd.bdate_range("2007-01-01", periods=3000)
+    shock = rng.normal(0, 1, len(days))
+    pairs = {p: pd.Series(shock * 5 + rng.normal(0, 15, len(days)), index=days)
+             for p in ("EURUSD", "GBPUSD", "AUDUSD")}
+    ev = days[rng.choice(len(days), 70, replace=False)]
+    r = S.permutation_test_pooled(pairs, ev, n_iter=1000)
+    assert not r.passed
+    for p in pairs:
+        pairs[p] = pairs[p].copy()
+        pairs[p].loc[ev] += 25
+    r2 = S.permutation_test_pooled(pairs, ev, n_iter=1000)
+    assert r2.passed and "EURUSD" in r2.strata_note
+
+
+# --- 差分4: 判定ロジックとレジーム表示 ---
+def test_judge_event_ignores_n100_but_keeps_pf():
+    good = S.Result(n=40, mean_pips=5, sd_pips=20, t=1.6, p=0.1, pf=1.5,
+                    win_rate=0.6, total_pips=200, max_dd_pips=50)
+    perm_pass = S.PermResult(5, 40, 10000, 0.01, 0.99, 0.01, 99.0, 0, 1, 5)
+    ok, why = S.judge(good, kind="event", perm=perm_pass)
+    assert ok, why                     # n=40 でも通る（差分4）
+    weak_pf = S.Result(n=40, mean_pips=5, sd_pips=20, t=1.6, p=0.1, pf=1.1,
+                       win_rate=0.6, total_pips=200, max_dd_pips=50)
+    ok2, why2 = S.judge(weak_pf, kind="event", perm=perm_pass)
+    assert not ok2 and "PF" in why2    # PF>=1.3 は維持される
+
+
+def test_judge_scan_still_requires_n100_and_bonferroni():
+    r = S.Result(n=80, mean_pips=5, sd_pips=20, t=3.0, p=0.01, pf=1.5,
+                 win_rate=0.6, total_pips=400, max_dd_pips=50)
+    ok, why = S.judge(r, kind="scan", n_tests=12)
+    assert not ok and "100回未満" in why
+    r2 = S.Result(n=200, mean_pips=5, sd_pips=20, t=2.3, p=0.02, pf=1.5,
+                  win_rate=0.6, total_pips=1000, max_dd_pips=50)
+    ok2, why2 = S.judge(r2, kind="scan", n_tests=12)
+    assert not ok2 and "Bonferroni" in why2
+
+
+def test_regime_cell_thresholds():
+    rng = np.random.default_rng(7)
+    assert "n不足のため算出せず" in S.regime_cell(S.summarize(rng.normal(1, 10, 29)))
+    assert "参考値" in S.regime_cell(S.summarize(rng.normal(1, 10, 30)))
+
+
+# --- 差分5: ファイル名 ---
+def test_results_go_to_preregistration_not_project_md():
+    from usdjpy_research.common import report
+    assert report.PREREG_MD.name == "PREREGISTRATION.md"
+    assert not (report.ROOT / "PROJECT.md").exists()
+
+
+# --- 上位足への集約が SL 判定を変えないこと ---
+def test_resample_preserves_high_low_touch():
+    from usdjpy_research.common.io import resample_bars
+    idx = pd.date_range("2024-04-01 00:00", periods=180, freq="min")
+    rng = np.random.default_rng(8)
+    close = 150 + np.cumsum(rng.normal(0, 0.01, 180))
+    df = pd.DataFrame({"open": close, "high": close + 0.01,
+                       "low": close - 0.01, "close": close}, index=idx)
+    h1 = resample_bars(df, "1h")
+    assert len(h1) == 3
+    for ts, row in h1.iterrows():
+        m = df.loc[ts:ts + pd.Timedelta(minutes=59)]
+        assert row["high"] == m["high"].max() and row["low"] == m["low"].min()
+        assert row["open"] == m["open"].iloc[0] and row["close"] == m["close"].iloc[-1]
+
+
+# --- 事前登録した定数（v1.1 追加分） ---
+def test_v11_constants():
+    from usdjpy_research.phases import (phase2_pre_fomc as p2,
+                                        phase6_quarter_end as p6)
+    assert p2.EXIT_OFFSET_MIN == 5
+    assert p2.SLIPPAGE_SCENARIOS == (0.0, 3.0, 5.0)
+    assert p6.POOL_SYMBOLS == ("EURUSD", "GBPUSD", "AUDUSD")
+    assert "JPY" not in "".join(p6.POOL_SYMBOLS)   # 円クロスは入れない
+    assert S.PERM_ITERS == 10_000 and S.PERM_ALPHA == 0.025

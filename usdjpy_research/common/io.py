@@ -151,3 +151,27 @@ def load_series_csv(path: str | Path, value_col: str | None = None) -> pd.Series
                   index=pd.to_datetime(df[date_col], errors="coerce"), name=value_col)
     s = s[s.index.notna()].dropna()
     return s[~s.index.duplicated(keep="first")].sort_index()
+
+
+def resample_bars(df: pd.DataFrame, rule: str = "1h") -> pd.DataFrame:
+    """M1 バーを上位足に集約する。
+
+    日足〜数日のホライズンを見る Phase（1・5・6）はこれを使う。
+    SL の「その水準に触れたか」の判定は、上位足の高値・安値でも M1 と
+    同じ答えになる（足の高安は内包する分足の高安と一致するため）。
+    変わるのは決済時刻の粒度だけで、その分パーミュテーション検定を
+    10,000回回しても現実的な時間で終わる。
+
+    分単位の順序が要る Phase（2・3）では **使ってはいけない**。
+    """
+    agg = {"open": "first", "high": "max", "low": "min", "close": "last"}
+    for c in ("tickvol", "vol"):
+        if c in df.columns:
+            agg[c] = "sum"
+    if "spread" in df.columns:
+        agg["spread"] = "mean"
+    out = df.resample(rule).agg(agg).dropna(subset=["close"])
+    out.attrs.update(df.attrs)
+    out.attrs["resampled_from"] = df.attrs.get("source_file", "?")
+    out.attrs["resample_rule"] = rule
+    return out

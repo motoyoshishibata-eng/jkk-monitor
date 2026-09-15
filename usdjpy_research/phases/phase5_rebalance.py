@@ -17,6 +17,13 @@
            ロンドン16時FIX 版も併記（FIXのサーバー時刻は英米DSTのズレで
            18:00/19:00 に変動するので common.tz が計算する）。
   閾値   : 推定量の絶対値で5分位に分け、**上位1分位のみ**でエントリー。
+  判定   : 事前登録された単一仮説のイベントスタディなので
+           **パーミュテーション検定**（10,000回・片側2.5%以内）+ PF>=1.3 で判定する
+           （v1.1 差分4）。ここでの置換は日付ではなく **推定量そのものの並べ替え**:
+           推定量を月末どうしで入れ替えて「上位分位の選択」と「方向の決定」を
+           やり直し、実測がその分布のどこに来るかを見る。
+           日付を動かすのではなく、月末という枠は固定したまま
+           「推定量に情報があるか」だけを検定できるのでこちらが素直。
   検定回数: 回帰1 + 上位分位売買1 + FIX版1 + 介入除外1 + 月全体版(比較用)1
             + レジーム別2 = 7 -> 余裕を見て 8 で補正する。
 
@@ -43,9 +50,10 @@ import pandas as pd
 from ..common import regime, tz
 from ..common.backtest import simulate, series_at_hour
 from ..common.cost import CostModel
-from ..common.io import load_mt5_bars, load_series_csv, PIP
+from ..common.io import load_mt5_bars, resample_bars, load_series_csv, PIP
 from ..common.report import PhaseReport
-from ..common.stats import summarize, bonferroni_t
+from ..common.stats import (summarize, bonferroni_t, judge, regime_cell,
+                            permutation_from_values, PERM_ITERS)
 
 ROOT = Path(__file__).resolve().parent.parent
 DATA, CONFIG = ROOT / "data", ROOT / "config"
@@ -125,12 +133,14 @@ def _ols_t(x: np.ndarray, y: np.ndarray):
 
 
 def run(bars_path: str, cost: CostModel, *, exec_hour: int = DEFAULT_EXEC_HOUR,
-        sl_pips: float = DEFAULT_SL_PIPS, write: bool = True) -> PhaseReport:
+        sl_pips: float = DEFAULT_SL_PIPS, n_iter: int = PERM_ITERS,
+        write: bool = True) -> PhaseReport:
     missing = [k for k, v in INDEX_FILES.items() if not v.exists()]
     if missing:
         return _missing_report(missing, write)
 
-    df = load_mt5_bars(bars_path)
+    # 月末3営業日の保有なので1時間足で足りる
+    df = resample_bars(load_mt5_bars(bars_path), "1h")
     px = series_at_hour(df, exec_hour)
     px.index = px.index.normalize()
     px = px[~px.index.duplicated(keep="first")]
@@ -258,14 +268,12 @@ def run(bars_path: str, cost: CostModel, *, exec_hour: int = DEFAULT_EXEC_HOUR,
     regime_str = "取引なし"
     if len(trades):
         lab = regime.label_series(pd.DatetimeIndex(trades["entry_time"]))
-        rows = []
-        for name, grp in trades.groupby(lab.to_numpy()):
-            r = summarize(grp["net_pips"])
-            rows.append([name, r.n, round(r.mean_pips, 2), round(r.t, 3), round(r.pf, 3)])
-        tables.append(("円高期 / 円安期 別（コスト控除後）",
-                       pd.DataFrame(rows, columns=["期", "n", "平均pips", "t", "PF"])
-                       .to_string(index=False)))
-        regime_str = " / ".join(f"{r[0]}: t={r[3]} PF={r[4]} n={r[1]}" for r in rows)
+        cells = [f"{name}: {regime_cell(summarize(grp['net_pips']))}"
+                 for name, grp in trades.groupby(lab.to_numpy())]
+        tables.append(("円高期 / 円安期 別（コスト控除後）", "\n".join(cells)
+                       + "\n\nレジーム別は参考値であり、単独では合否判定に使わない"
+                         "（v1.1 差分4）。"))
+        regime_str = " / ".join(cells)
 
     # --- (5) 近傍安定性: 窓を ±1日 ---
     stab = []
@@ -288,25 +296,53 @@ def run(bars_path: str, cost: CostModel, *, exec_hour: int = DEFAULT_EXEC_HOUR,
     signs = {np.sign(v) for v in [res.mean_pips] + [s[2] for s in stab] if v == v}
     stable = len(signs) == 1
 
+    # --- 差分4: 推定量の並べ替えによるパーミュテーション検定 ---
+    # 月末という枠は固定したまま、推定量を月末どうしで入れ替える。
+    # 「上位分位の選択」と「方向の決定」をやり直して同じ統計量を作り直す。
+    long_pnl, short_pnl = {}, {}
+    for d0 in (+1, -1):
+        sig_all = [( _dt.datetime.combine(r["start"].date(), _dt.time(exec_hour, 0)),
+                     _dt.datetime.combine(r["month_end"].date(), _dt.time(exec_hour, 0)),
+                     d0, str(r["month_end"].date()))
+                   for _, r in panel.iterrows()]
+        tr_all = simulate(df, sig_all, cost, sl_pips=sl_pips)
+        book = dict(zip(tr_all["tag"], tr_all["net_pips"])) if len(tr_all) else {}
+        (long_pnl if d0 > 0 else short_pnl).update(book)
+
+    keys = [str(x.date()) for x in panel["month_end"]]
+    have = np.array([k in long_pnl and k in short_pnl for k in keys])
+    pl = np.array([long_pnl.get(k, np.nan) for k in keys])
+    ps = np.array([short_pnl.get(k, np.nan) for k in keys])
+    est_arr = panel["est"].to_numpy()
+    n_top = max(1, int(round(len(est_arr) / N_QUANTILES)))
+
+    def _stat(est_v: np.ndarray) -> float:
+        order = np.argsort(-np.abs(est_v))
+        sel = [i for i in order if have[i]][:n_top]
+        if not sel:
+            return np.nan
+        return float(np.mean([(pl[i] if est_v[i] < 0 else ps[i]) for i in sel]))
+
+    rng_p = np.random.default_rng(20260915)
+    observed_stat = _stat(est_arr)
+    null_vals = [_stat(rng_p.permutation(est_arr)) for _ in range(n_iter)]
+    perm = permutation_from_values(observed_stat, [v for v in null_vals if v == v])
+    tables.append((f"パーミュテーション検定（v1.1 差分4・{n_iter:,}回）",
+                   perm.summary() + "\n\n"
+                   "推定量を月末どうしで並べ替え、『上位分位の選択』と『方向の決定』を"
+                   "やり直したときの分布。\n"
+                   "月末という枠は固定したままなので、『月末に何かある』ことではなく"
+                   "『推定量に情報があるか』だけを検定できる。"))
+
     crit = bonferroni_t(N_TESTS)
-    chk = res.passes(N_TESTS)
-    verdict = "合格" if (chk["overall"] and stable and abs(res_ex.t) >= 2) else "不合格"
-    if verdict == "不合格":
-        if res.n < 100:
-            reason = (f"取引回数 {res.n} 回。月次シグナルの上位{N_QUANTILES}分の1では"
-                      f"20年でも100回に届かない構造的な限界。")
-        elif abs(res.t) < 2:
-            reason = (f"コスト控除後 t={res.t:.2f} で |t|>=2 未満。"
-                      f"UBS修正版の回帰も t={t:.2f}/R2={r2:.4f} と弱い。")
-        elif res.pf < 1.3:
-            reason = f"コスト控除後 PF={res.pf:.2f} で基準の1.3未満。"
-        elif abs(res_ex.t) < 2:
-            reason = f"介入日を除くと t={res_ex.t:.2f} に落ちる。介入に依存した結果。"
-        else:
-            reason = "窓を±1営業日ずらすと符号が反転する。"
-    else:
-        reason = (f"控除後 t={res.t:.2f}/PF={res.pf:.2f}/n={res.n}、"
-                  f"介入日除外でも t={res_ex.t:.2f} を維持。")
+    ok, reason = judge(res, kind="event", perm=perm)
+    if ok and abs(res_ex.t) < 2 and res_ex.n >= 10:
+        ok, reason = False, (f"介入日を除くと t={res_ex.t:.2f} に落ちる。介入に依存した結果。")
+    if ok and not stable:
+        ok, reason = False, "窓を±1営業日ずらすと符号が反転する。"
+    verdict = "合格" if ok else "不合格"
+    reason += (f"（UBS修正版の回帰 t={t:.2f}/R2={r2:.4f}、"
+               f"旧来版 R2={r2f:.4f}）")
 
     rep = PhaseReport(
         phase="Phase 5", axis="月末リバランスフローの量推定（UBS修正版）",
@@ -316,7 +352,12 @@ def run(bars_path: str, cost: CostModel, *, exec_hour: int = DEFAULT_EXEC_HOUR,
                       f" 窓 {WINDOW_DAYS}営業日 / 上位{N_QUANTILES}分の1のみ /"
                       f" 方向 −sign(estimate) / 検定{N_TESTS}回",
         n_tests=N_TESTS, bonferroni_crit_t=crit,
-        result_after_cost=f"t = {res.t:.3f} / PF = {res.pf:.3f} / 取引回数 = {res.n}"
+        judgment_method=f"パーミュテーション検定 {n_iter:,}回"
+                        "（推定量の並べ替え）+ PF>=1.3",
+        permutation=perm.summary().replace("\n", " / "),
+        result_after_cost=f"片側p = {perm.p_one_sided:.4f}"
+                          f"（{perm.percentile:.1f}パーセンタイル）/ "
+                          f"PF = {res.pf:.3f} / 取引回数 = {res.n} / t = {res.t:.3f}"
                           f"（介入日除外 t = {res_ex.t:.3f}）",
         regime_breakdown=regime_str,
         neighborhood="崩れない" if stable else "崩れる",

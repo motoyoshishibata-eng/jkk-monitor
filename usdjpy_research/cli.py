@@ -18,7 +18,7 @@
   python3 -m usdjpy_research.cli phase 1 --bars data/USDJPY_M1.csv --broker ava
 
 結果は usdjpy_research/reports/ に Phase ごとの .md として保存され、
-PROJECT.md の「Phase 結果」セクションにも自動で追記されます。
+PREREGISTRATION.md の「Phase 結果」セクションにも自動で追記されます。
 """
 
 from __future__ import annotations
@@ -58,7 +58,8 @@ def _preflight(broker: str) -> bool:
         ok = False
     if regime.is_placeholder():
         print("[警告] 円高期/円安期の区分が暫定値です。"
-              "config/regimes.csv を PROJECT.md §4 決定表の値に書き換えてください。"
+              "config/regimes.csv を既存EA開発リポジトリの PROJECT.md §4 決定表の"
+              "値に書き換えてください。"
               "（実行は続行しますが、期別集計は参考値扱いになります）")
     return ok
 

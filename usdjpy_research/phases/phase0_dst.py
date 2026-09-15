@@ -12,8 +12,20 @@
   (B) 東京イベント（仲値 09:55 JST）はサーバー時間で夏冬 1 時間ずれるはず
       -> 夏 03:55 / 冬 02:55 にスパイクが出る
   (C) 週の開始・終了時刻はサーバー時間で夏冬とも同じはず
+  (D) ★最も識別力が高い（指示書 v1.1 差分1で追加）
+      EUと米国の DST 切替日のギャップ期間を使う。ロンドン16時FIX の
+      サーバー時刻は、通常期 18:00 に対しギャップ期間だけ 19:00 になるはず。
 
-(A)(B)(C) がすべて成立すれば指示書 §0-2 の前提は正しい。
+      | 期間                                  | 期待値 |
+      |---------------------------------------|--------|
+      | 通常期（夏・冬とも両地域が揃っている）| 18:00  |
+      | 3月第2日曜 〜 3月最終日曜（米のみ夏） | 19:00  |
+      | 10月最終日曜 〜 11月第1日曜（EUのみ冬）| 19:00  |
+
+      これが確認できれば「サーバーは米DSTに追従し、EUのDSTには追従しない」
+      が確定する。既存のロンドンFIX EA で対処した「秋ズレ」と同じ現象。
+
+(A)(B)(C)(D) がすべて成立すれば指示書 §0-2 の前提は正しい。
 どれかが崩れたら **定数を書き換えず、そのまま報告すること。**
 """
 
@@ -103,6 +115,29 @@ def run(bars_path: str, write: bool = True) -> PhaseReport:
             f"ずれ  : {shift:+d} 分（期待 +60）",
         ])))
 
+        # --- (D) ロンドン16時FIX: 英米DSTのギャップ期間だけ1時間ずれる ---
+        uk = dates.map(tz.is_uk_dst).to_numpy()
+        gap = dst & ~uk           # 米は夏・英は冬 -> ギャップ期間
+        normal = (dst & uk) | (~dst & ~uk)
+        g_prof = _minute_profile(df, act, gap, 17 * 60, 20 * 60 + 30)
+        n_prof = _minute_profile(df, act, normal, 17 * 60, 20 * 60 + 30)
+        g_peak = int(g_prof.idxmax()) if len(g_prof) else -1
+        n_peak = int(n_prof.idxmax()) if len(n_prof) else -1
+        n_gap_days = int(len(set(df.index[gap].date)))
+        checks["(D) ロンドンFIXがギャップ期間だけ+60分ずれる"] = (
+            n_peak == 18 * 60 and g_peak == 19 * 60)
+        tables.append(("(D) ロンドン16時FIX のサーバー時刻（英米DSTギャップの検証）",
+                       "\n".join([
+            f"通常期      : ピーク {_hhmm(n_peak)}  （期待 18:00）",
+            f"ギャップ期間: ピーク {_hhmm(g_peak)}  （期待 19:00）"
+            f"   対象 {n_gap_days} 営業日",
+            f"ずれ        : {g_peak - n_peak:+d} 分（期待 +60）",
+            "",
+            "ギャップ期間 = 3月第2日曜〜3月最終日曜、10月最終日曜〜11月第1日曜。",
+            "成立すれば『サーバーは米DSTに追従、EUのDSTには追従しない』が確定する。",
+            "既存のロンドンFIX EA で対処した「秋ズレ」と同じ現象のはず。",
+        ])))
+
         # --- (A) 米雇用統計 08:30ET = サーバー15:30 ---
         first_fri = pd.Series(df.index.date, index=df.index).map(
             lambda d: d.weekday() == 4 and d.day <= 7).to_numpy()
@@ -118,7 +153,7 @@ def run(bars_path: str, write: bool = True) -> PhaseReport:
             "ずれていなければ、米国イベント基準の Phase 1〜3 は DST 処理不要。",
         ])))
     else:
-        notes.append("M1 データではないため (A)(B) の分単位検証をスキップした。"
+        notes.append("M1 データではないため (A)(B)(D) の分単位検証をスキップした。"
                      " 必ず M1 を出力して再実行すること。")
         prof = pd.DataFrame({"hour": df.index.hour, "act": act.to_numpy(),
                              "dst": dst})
@@ -135,12 +170,14 @@ def run(bars_path: str, write: bool = True) -> PhaseReport:
         phase="Phase 0-2", axis="サーバー時間 / DST 前提の実データ検証",
         hypothesis="ファイネストMT5は GMT+3(米夏)/GMT+2(米冬) で米国DSTに追従する",
         preregistered="(A)雇用統計は 15:30 固定 / (B)東京仲値は 03:55⇔02:55 で60分ずれ /"
-                      " (C)週開始時刻は夏冬同一",
+                      " (C)週開始時刻は夏冬同一 /"
+                      " (D)ロンドンFIXは通常期18:00・英米DSTギャップ期間19:00",
         n_tests=len(checks),
         result_after_cost="該当なし（コストのかからないデータ検証）",
         neighborhood="該当なし",
         verdict="前提は成立" if ok else "前提が崩れている（要報告）",
-        reason=("(A)(B)(C) すべて成立。米国イベント基準の Phase 1〜3 は DST 処理不要。"
+        reason=("(A)(B)(C)(D) すべて成立。サーバーは米DSTに追従しEUのDSTには追従しない。"
+                "米国イベント基準の Phase 1〜3 は DST 処理不要。"
                 if ok else
                 "上記 NG 項目があるため、指示書 §0-2 の前提をそのまま使えない。"
                 "定数を書き換えず、まず報告すること。"),

@@ -155,7 +155,9 @@ def simulate_stop_entry(df: pd.DataFrame, setups, cost: CostModel, *,
     """逆指値（ブレイクアウト）エントリー版。
 
     setups = iterable of (window_start, window_end, direction, trigger_price,
-                          exit_dt, tag)
+                          exit_dt, tag[, sl_pips])
+    7要素目に SL を入れると、そのセットアップだけ SL 幅を変えられる
+    （Phase 3 は「カット前1時間のレンジ幅」を SL にするので日ごとに違う）。
     window 内で trigger_price に触れたら約定したとみなす。約定価格は
     trigger_price を entry_slippage_pips だけ不利側にずらした値
     （逆指値は不利に滑るのが普通なので、有利側に約定させない）。
@@ -169,7 +171,9 @@ def simulate_stop_entry(df: pd.DataFrame, setups, cost: CostModel, *,
     highs, lows = df["high"].to_numpy(), df["low"].to_numpy()
     rows: list[Trade] = []
 
-    for w0, w1, direction, trigger, exit_dt, tag in setups:
+    for setup in setups:
+        w0, w1, direction, trigger, exit_dt, tag = setup[:6]
+        sl_this = float(setup[6]) if len(setup) > 6 and setup[6] is not None else sl_pips
         i0 = idx.searchsorted(pd.Timestamp(w0), side="left")
         i1 = idx.searchsorted(pd.Timestamp(w1), side="right")
         if i1 <= i0:
@@ -188,7 +192,7 @@ def simulate_stop_entry(df: pd.DataFrame, setups, cost: CostModel, *,
         hit_sl = False
         x_ts = x_px = None
         if j1 > j0:
-            sl_px = e_px - direction * sl_pips * PIP
+            sl_px = e_px - direction * sl_this * PIP
             bad = (np.flatnonzero(lows[j0:j1] <= sl_px) if direction > 0
                    else np.flatnonzero(highs[j0:j1] >= sl_px))
             if bad.size:

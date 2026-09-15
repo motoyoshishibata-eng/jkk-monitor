@@ -1,10 +1,11 @@
 """円高期 / 円安期 の区分。
 
 指示書 §1 は「PROJECT.md の §4 決定表に記載済みの区分をそのまま流用。
-新たに定義し直さない」と定めている。しかし本リポジトリには既存の
-PROJECT.md §4 が存在しなかったため、ここでは **暫定の区分** を置いている。
+新たに定義し直さない」と定めている。ここでいう PROJECT.md は
+**既存EA開発リポジトリ**のもので（本パッケージの PREREGISTRATION.md ではない）、
+本セッションからは参照できなかったため **暫定の区分** を置いている。
 
-*** 必ず config/regimes.csv を手元の §4 決定表の値で上書きすること。***
+*** 必ず config/regimes.csv を 既存EA開発リポジトリの PROJECT.md §4 決定表の値で上書きすること。***
 上書きしないまま出した円高期/円安期の別掲は、指示書の要件を満たさない。
 暫定値のまま実行すると全レポートの先頭に警告が出る。
 """
@@ -47,6 +48,6 @@ def label_series(index: pd.DatetimeIndex, regimes: pd.DataFrame | None = None) -
 def warning_banner() -> str:
     if is_placeholder():
         return ("!! 警告: 円高期/円安期の区分が暫定値のままです。"
-                "config/regimes.csv を PROJECT.md §4 決定表の区分で上書きしてから"
+                f"config/regimes.csv を既存EA開発リポジトリの PROJECT.md §4 決定表の区分で上書きしてから"
                 "再実行してください。以下の期別集計は参考値に過ぎません。\n")
     return ""

@@ -155,3 +155,291 @@ class TestCounter:
     @property
     def crit_t(self) -> float:
         return bonferroni_t(len(self))
+
+
+# =====================================================================
+# 指示書 v1.1 差分4: 事前登録された単一仮説のイベントスタディは
+# n>=100 + Bonferroni ではなく **パーミュテーション検定** で判定する。
+#
+# 100回基準は候補が数千ある総当たり探索の安全装置であって、
+# 年8回しかない FOMC のようなイベントスタディには不適切だった。
+# これは基準の緩和ではなく、判定方法を仮説の形に合わせる修正。
+# PF>=1.3・コスト控除後・レジーム別掲の要件はそのまま維持する。
+# =====================================================================
+
+PERM_ALPHA = 0.025      # 片側2.5パーセンタイル（両側5%相当）
+PERM_ITERS = 10_000
+
+
+@dataclass
+class PermResult:
+    observed: float
+    n_events: int
+    n_iter: int
+    p_upper: float          # 帰無分布が実測以上になる割合
+    p_lower: float
+    p_one_sided: float      # min(p_upper, p_lower)
+    percentile: float       # 実測が帰無分布の何パーセンタイルか
+    null_mean: float
+    null_sd: float
+    n_strata: int
+    strata_note: str = ""
+
+    @property
+    def passed(self) -> bool:
+        return self.p_one_sided <= PERM_ALPHA
+
+    def summary(self) -> str:
+        side = "上側" if self.p_upper <= self.p_lower else "下側"
+        how = (f"イベント{self.n_events}件, {self.n_strata}層で曜日・月を実測に合わせて再抽出"
+               if self.n_events else (self.strata_note or "帰無分布を直接構成"))
+        return (f"実測 {self.observed:.3f} / 帰無分布 平均 {self.null_mean:.3f} "
+                f"±{self.null_sd:.3f}\n"
+                f"パーセンタイル {self.percentile:.2f}%  "
+                f"片側p（{side}）= {self.p_one_sided:.4f}  "
+                f"（{self.n_iter:,}回, {how}）\n"
+                f"判定: {'合格' if self.passed else '不合格'}"
+                f"（合格基準 片側 {PERM_ALPHA:.3f} 以内）")
+
+
+def permutation_test_multi(contrib_by_group: dict, events, *,
+                           n_iter: int = PERM_ITERS, seed: int = 20260915,
+                           match_dow: bool = True, match_month: bool = True
+                           ) -> PermResult:
+    """複数の「窓の型」が混ざるイベントスタディ用のパーミュテーション検定。
+
+    contrib_by_group : {グループ名: Series(index=候補営業日, value=寄与)}
+                       グループは「保有5営業日」「保有4営業日」のように
+                       窓の形が違うものを分ける。形の違う窓を混ぜて再抽出すると
+                       帰無分布が実測と別物になるため。
+    events           : [(イベント日, グループ名), ...]
+
+    層は (曜日, 月, グループ) で切り、層内は非復元抽出。
+    """
+    ev = [(pd.Timestamp(d).normalize(), g) for d, g in events
+          if g in contrib_by_group
+          and pd.Timestamp(d).normalize() in contrib_by_group[g].index]
+    if not ev:
+        nan = float("nan")
+        return PermResult(nan, 0, n_iter, nan, nan, nan, nan, nan, nan, 0,
+                          "イベントが候補日に1件も一致しない")
+
+    observed = float(np.mean([contrib_by_group[g].loc[d] for d, g in ev]))
+    rng = np.random.default_rng(seed)
+    totals = np.zeros(n_iter, dtype="float64")
+    n_strata, shortfall = 0, []
+
+    def key(ts, g):
+        k = [g]
+        if match_dow:
+            k.append(int(ts.dayofweek))
+        if match_month:
+            k.append(int(ts.month))
+        return tuple(k)
+
+    want: dict = {}
+    for d, g in ev:
+        want.setdefault(key(d, g), []).append(g)
+
+    for k, members in want.items():
+        g = members[0]
+        need = len(members)
+        cand = contrib_by_group[g]
+        ci = pd.DatetimeIndex(cand.index)
+        m = np.ones(len(ci), dtype=bool)
+        if match_dow:
+            m &= ci.dayofweek.to_numpy() == k[1]
+        if match_month:
+            m &= ci.month.to_numpy() == k[2 if match_dow else 1]
+        pool = cand.to_numpy()[m]
+        n_strata += 1
+        if pool.size == 0:
+            shortfall.append(f"層{k}: 候補日なし")
+            continue
+        if pool.size < need:
+            shortfall.append(f"層{k}: 候補{pool.size}件 < 必要{need}件のため復元抽出")
+            pick = rng.integers(0, pool.size, size=(n_iter, need))
+        else:
+            r = rng.random((n_iter, pool.size))
+            pick = np.argpartition(r, need - 1, axis=1)[:, :need]
+        totals += pool[pick].sum(axis=1)
+
+    null = totals / len(ev)
+    p_up = (1 + int((null >= observed).sum())) / (1 + n_iter)
+    p_lo = (1 + int((null <= observed).sum())) / (1 + n_iter)
+    return PermResult(observed, len(ev), n_iter, p_up, p_lo, min(p_up, p_lo),
+                      float((null < observed).mean() * 100),
+                      float(null.mean()), float(null.std(ddof=1)), n_strata,
+                      "; ".join(shortfall))
+
+
+def permutation_test(contrib: pd.Series, event_dates, **kw) -> PermResult:
+    """イベント日をランダムな営業日に置き換えて帰無分布を作る（単一の窓の型）。
+
+    contrib      : index=候補営業日, value=その日をイベント日としたときの寄与
+                   （コスト控除後の損益をそのまま入れる。SL 込みで構わない）
+    event_dates  : 実際のイベント日
+
+    曜日・月の分布を実測に合わせて層化抽出する（差分4の指定）。
+    FOMC は火水に偏るので、完全ランダムだと帰無分布が歪んで
+    「有意でないものが有意に見える」方向に倒れるため。
+    層の中では非復元抽出（同じ日を1回の置換内で二度使わない）。
+    """
+    c = pd.Series(contrib).dropna().astype("float64")
+    c.index = pd.DatetimeIndex(c.index).normalize()
+    c = c[~c.index.duplicated()].sort_index()
+    ev = [(d, "_") for d in pd.DatetimeIndex(event_dates).normalize()]
+    return permutation_test_multi({"_": c}, ev, **kw)
+
+
+def permutation_from_values(observed: float, null_values) -> PermResult:
+    """すでに帰無分布を作ってある場合のラッパー（Phase 5 のシグナル並べ替え用）。"""
+    null = np.asarray(list(null_values), dtype="float64")
+    n = null.size
+    p_up = (1 + int((null >= observed).sum())) / (1 + n)
+    p_lo = (1 + int((null <= observed).sum())) / (1 + n)
+    return PermResult(observed, 0, n, p_up, p_lo, min(p_up, p_lo),
+                      float((null < observed).mean() * 100),
+                      float(null.mean()), float(null.std(ddof=1)), 1,
+                      "シグナル値の並べ替えによる帰無分布")
+
+
+def judge(res: Result, *, kind: str, perm: PermResult | None = None,
+          n_tests: int = 1) -> tuple[bool, str]:
+    """合否判定。差分4 の2本立て。
+
+    kind="event": 事前登録された単一仮説のイベントスタディ
+                  -> パーミュテーション検定（片側2.5%以内）+ PF>=1.3
+    kind="scan" : 総当たり探索型 -> n>=100 + |t|>=2 + PF>=1.3 + Bonferroni
+    """
+    if kind == "scan":
+        crit = bonferroni_t(n_tests)
+        ok = (res.n >= N_MIN and abs(res.t) >= T_MIN and res.pf >= PF_MIN
+              and abs(res.t) >= crit)
+        if res.n < N_MIN:
+            return False, f"取引回数 {res.n} 回で基準の{N_MIN}回未満。"
+        if abs(res.t) < T_MIN:
+            return False, f"コスト控除後 t={res.t:.2f} で |t|>={T_MIN} 未満。"
+        if res.pf < PF_MIN:
+            return False, f"コスト控除後 PF={res.pf:.2f} で基準の{PF_MIN}未満。"
+        if abs(res.t) < crit:
+            return False, (f"名目 t={res.t:.2f} は満たすが Bonferroni臨界 "
+                           f"{crit:.2f}（検定{n_tests}回）に届かない。")
+        return ok, f"コスト控除後 t={res.t:.2f} / PF={res.pf:.2f} / n={res.n}。"
+
+    if perm is None or perm.observed != perm.observed:
+        return False, "パーミュテーション検定を実行できなかった（候補日不足）。"
+    if res.n == 0:
+        return False, "取引が1件も成立しなかった。"
+    if not perm.passed:
+        return False, (f"パーミュテーション検定 片側p={perm.p_one_sided:.4f} で"
+                       f"基準の {PERM_ALPHA} 以内に入らない"
+                       f"（実測はランダム日程の{perm.percentile:.1f}パーセンタイル）。")
+    if res.pf < PF_MIN:
+        return False, (f"パーミュテーション検定は通るが、コスト控除後 "
+                       f"PF={res.pf:.2f} で基準の{PF_MIN}未満。")
+    return True, (f"パーミュテーション検定 片側p={perm.p_one_sided:.4f}"
+                  f"（{perm.percentile:.1f}パーセンタイル）、"
+                  f"コスト控除後 PF={res.pf:.2f} / n={res.n}。")
+
+
+REGIME_MIN_N = 30
+
+
+def regime_cell(res: Result) -> str:
+    """レジーム別掲の表示ルール（差分4）。
+
+    n >= 30 : 数値を出すが「参考値」ラベルを付け、単独では合否判定に使わない
+    n <  30 : 「n不足のため算出せず」と明記し、無理に数字を出さない
+    """
+    if res.n < REGIME_MIN_N:
+        return f"n={res.n} — n不足のため算出せず"
+    return (f"n={res.n} 平均={res.mean_pips:.2f}pips t={res.t:.3f} "
+            f"PF={res.pf:.3f}（参考値）")
+
+
+def permutation_test_pooled(contribs: dict, event_dates, *,
+                            n_iter: int = PERM_ITERS, seed: int = 20260915,
+                            standardize: bool = True,
+                            match_dow: bool = True, match_month: bool = True
+                            ) -> PermResult:
+    """複数通貨ペアをプールしたパーミュテーション検定（v1.1 差分4）。
+
+    contribs : {通貨ペア: Series(index=候補営業日, value=寄与)}
+
+    四半期末のドル調達仮説は USD 側の現象なので、EURUSD / GBPUSD / AUDUSD を
+    プールして検定してよい（円クロスは円側要因が混入するので入れない）。
+
+    重要: 1回の置換で **全ペアに同じランダム日付** を使う。ペアごとに別々の日を
+    引くと、同じ日に一斉に動く（＝互いに相関した）という実際の構造が消えて
+    帰無分布の分散が小さくなり、有意に見えすぎるため。
+
+    standardize=True のとき各ペアの寄与を候補日全体で標準化してから足す
+    （pips のスケールがペアごとに違うので、そのまま足すと値幅の大きいペアが
+    支配してしまう）。
+    """
+    series = {}
+    for k, v in contribs.items():
+        s = pd.Series(v).dropna().astype("float64")
+        s.index = pd.DatetimeIndex(s.index).normalize()
+        series[k] = s[~s.index.duplicated()].sort_index()
+    if not series:
+        nan = float("nan")
+        return PermResult(nan, 0, n_iter, nan, nan, nan, nan, nan, nan, 0, "系列なし")
+
+    common = None
+    for s in series.values():
+        common = s.index if common is None else common.intersection(s.index)
+    common = pd.DatetimeIndex(sorted(common))
+    names = sorted(series)
+    mat = np.column_stack([series[k].reindex(common).to_numpy() for k in names])
+    if standardize:
+        sd = mat.std(axis=0, ddof=1)
+        sd[sd == 0] = 1.0
+        mat = (mat - mat.mean(axis=0)) / sd
+
+    ev = pd.DatetimeIndex(pd.DatetimeIndex(event_dates).normalize())
+    ev = ev[ev.isin(common)]
+    if len(ev) == 0:
+        nan = float("nan")
+        return PermResult(nan, 0, n_iter, nan, nan, nan, nan, nan, nan, 0,
+                          "イベントが共通候補日に1件も一致しない")
+    pos_of = {d: i for i, d in enumerate(common)}
+    ev_pos = np.array([pos_of[d] for d in ev])
+    observed = float(mat[ev_pos].mean())
+
+    def key(idx: pd.DatetimeIndex):
+        k = np.zeros(len(idx), dtype=np.int64)
+        if match_dow:
+            k = k * 7 + idx.dayofweek.to_numpy()
+        if match_month:
+            k = k * 13 + idx.month.to_numpy()
+        return k
+
+    cand_key, ev_key = key(common), key(ev)
+    rng = np.random.default_rng(seed)
+    totals = np.zeros(n_iter, dtype="float64")
+    n_strata, shortfall = 0, []
+    for k in np.unique(ev_key):
+        need = int((ev_key == k).sum())
+        pool = np.flatnonzero(cand_key == k)
+        n_strata += 1
+        if pool.size == 0:
+            shortfall.append(f"層{k}: 候補日なし")
+            continue
+        if pool.size < need:
+            shortfall.append(f"層{k}: 候補{pool.size}件 < 必要{need}件のため復元抽出")
+            pick = rng.integers(0, pool.size, size=(n_iter, need))
+        else:
+            r = rng.random((n_iter, pool.size))
+            pick = np.argpartition(r, need - 1, axis=1)[:, :need]
+        # 同じランダム日付を全ペアに適用（ペア間の相関を保つ）
+        totals += mat[pool[pick]].sum(axis=(1, 2))
+
+    null = totals / (len(ev) * mat.shape[1])
+    p_up = (1 + int((null >= observed).sum())) / (1 + n_iter)
+    p_lo = (1 + int((null <= observed).sum())) / (1 + n_iter)
+    return PermResult(observed, len(ev), n_iter, p_up, p_lo, min(p_up, p_lo),
+                      float((null < observed).mean() * 100),
+                      float(null.mean()), float(null.std(ddof=1)), n_strata,
+                      "; ".join(shortfall) + f" / プール対象: {', '.join(names)}")

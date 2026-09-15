@@ -10,6 +10,7 @@
 正しく機能することを確かめるため）:
   - 東京仲値の出来高スパイク（夏 03:55 / 冬 02:55 サーバー時間）
   - 米雇用統計の出来高スパイク（第1金曜 15:30 サーバー時間, 年間固定）
+  - ロンドン16時FIX の出来高スパイク（通常期 18:00 / 英米DSTギャップ期間 19:00）
   - 時間帯依存のスプレッド
 価格は方向性のないランダムウォークなので、Phase 1〜6 は
 「不合格」が出るのが正しい挙動。
@@ -57,6 +58,10 @@ def build(start: str, end: str, seed: int = 7) -> pd.DataFrame:
     vol += np.where((hour == fix_h) & (minute == 55), 900.0, 0.0)
     first_fri = dates.map(lambda d: d.weekday() == 4 and d.day <= 7).to_numpy()
     vol += np.where(first_fri & (hour == 15) & (minute == 30), 2500.0, 0.0)
+    # ロンドン16時FIX: 通常期 18:00 / 英米DSTギャップ期間 19:00（Phase 0-2 の検証(D)用）
+    uk = dates.map(tz.is_uk_dst).to_numpy()
+    fix_hour = np.where(dst & ~uk, 19, 18)
+    vol += np.where((hour == fix_hour) & (minute == 0), 1200.0, 0.0)
 
     # spread(points, 3桁想定): 早朝とNYクローズ前後で拡大
     base = np.where((hour >= 22) | (hour <= 1), 28.0, 0.0) + 11.0
