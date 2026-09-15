@@ -23,3 +23,6 @@ data/raw/
 
 # Claude Code local settings
 .claude/
+usdjpy_research/data/*.csv
+usdjpy_research/reports/*.md
+!usdjpy_research/data/README.md
