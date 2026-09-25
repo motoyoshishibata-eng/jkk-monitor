@@ -1,5 +1,5 @@
 {
-  "last_checked_at": "2026-09-25T08:09:47.873360",
+  "last_checked_at": "2026-09-25T08:17:39.675755",
   "known_listings": {
     "jkk:4080120_0000": {
       "name": "カーメスト武蔵小金井",
@@ -13,6 +13,6 @@
       "first_seen_at": "2026-09-25T08:08:56.562214"
     }
   },
-  "consecutive_failures": 1,
+  "consecutive_failures": 0,
   "failure_notified": false
 }
