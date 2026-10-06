@@ -1,5 +1,5 @@
 {
-  "last_checked_at": "2026-10-06T04:58:51.026252",
+  "last_checked_at": "2026-10-06T05:08:32.390730",
   "known_listings": {
     "jkk:4080010_0000": {
       "name": "小金井本町",
@@ -35,6 +35,6 @@
       "first_seen_at": "2026-10-06T04:57:33.236417"
     }
   },
-  "consecutive_failures": 1,
+  "consecutive_failures": 0,
   "failure_notified": false
 }
