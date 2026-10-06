@@ -1,17 +1,6 @@
 {
-  "last_checked_at": "2026-10-06T05:23:21.663044",
+  "last_checked_at": "2026-10-06T05:27:50.346827",
   "known_listings": {
-    "jkk:4080010_0000": {
-      "name": "小金井本町",
-      "room": "0000",
-      "rent": 73200,
-      "address": "小金井市",
-      "layout": "3K",
-      "area_m2": 39.96,
-      "url": "https://jhomes.to-kousya.or.jp/search/jkknet/service/akiyaJyoukenStartInit",
-      "jkk_id": "4080010_0000",
-      "first_seen_at": "2026-10-06T04:57:33.236323"
-    },
     "jkk:4080020_0000": {
       "name": "小金井貫井",
       "room": "0000",
